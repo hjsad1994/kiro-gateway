@@ -590,7 +590,7 @@ class TestBuildKiroPayload:
             build_kiro_payload(request, "conv-123", "")
         
         print(f"Исключение: {exc_info.value}")
-        assert "Нет сообщений" in str(exc_info.value)
+        assert "No messages to send" in str(exc_info.value)
     
     def test_uses_continue_for_empty_content(self):
         """
