@@ -17,12 +17,11 @@ The project is organized as a modular Python package `kiro_gateway/`:
 ```
 kiro-openai-gateway/
 ├── main.py                    # Entry point, FastAPI application creation
-├── config.py                  # Legacy config (for backward compatibility)
-├── debug_logger.py            # Debug logging of requests
 ├── requirements.txt           # Python dependencies
+├── .env.example               # Environment configuration example
 │
 ├── kiro_gateway/              # Main package
-│   ├── __init__.py            # Package exports
+│   ├── __init__.py            # Package exports, version
 │   ├── config.py              # Configuration and constants
 │   ├── models.py              # Pydantic models for OpenAI API
 │   ├── auth.py                # KiroAuthManager - token management
@@ -32,20 +31,41 @@ kiro-openai-gateway/
 │   ├── parsers.py             # AWS SSE stream parsers
 │   ├── streaming.py           # Response streaming logic
 │   ├── http_client.py         # HTTP client with retry logic
-│   └── routes.py              # FastAPI routes
+│   ├── routes.py              # FastAPI routes
+│   ├── debug_logger.py        # Debug request logging
+│   └── exceptions.py          # Exception handlers
 │
 ├── tests/                     # Tests
+│   ├── conftest.py            # Pytest fixtures
 │   ├── unit/                  # Unit tests
 │   └── integration/           # Integration tests
 │
-└── debug_logs/                # Debug logs (generated)
+├── docs/                      # Documentation
+│   ├── ru/                    # Russian version
+│   └── en/                    # English version
+│
+└── debug_logs/                # Debug logs (generated when DEBUG_LAST_REQUEST=true)
 ```
 
 ## 3. Architectural Topology and Components
 
 The system is built on the asynchronous `FastAPI` framework and uses an event-driven lifecycle management model (`Lifespan Events`).
 
-### 3.1. Configuration Module (`kiro_gateway/config.py`)
+### 3.1. Entry Point (`main.py`)
+
+The `main.py` file is responsible for:
+
+1. **Logging configuration** — Loguru setup with colored output
+2. **Configuration validation** — `validate_configuration()` function checks:
+   - Presence of `.env` file
+   - Presence of credentials (REFRESH_TOKEN or KIRO_CREDS_FILE)
+3. **Lifespan Manager** — creation and initialization of:
+   - `KiroAuthManager` for token management
+   - `ModelInfoCache` for model caching
+4. **Error handler registration** — `validation_exception_handler` for 422 errors
+5. **Route connection** — `app.include_router(router)`
+
+### 3.2. Configuration Module (`kiro_gateway/config.py`)
 
 Centralized storage of all settings:
 
@@ -53,12 +73,55 @@ Centralized storage of all settings:
 |-----------|-------------|---------------|
 | `PROXY_API_KEY` | API key for proxy access | `changeme_proxy_secret` |
 | `REFRESH_TOKEN` | Kiro refresh token | from `.env` |
+| `PROFILE_ARN` | AWS CodeWhisperer profile ARN | from `.env` |
 | `REGION` | AWS region | `us-east-1` |
+| `KIRO_CREDS_FILE` | Path to JSON credentials file | from `.env` |
 | `TOKEN_REFRESH_THRESHOLD` | Time before token refresh | 600 sec (10 min) |
 | `MAX_RETRIES` | Max retry attempts | 3 |
+| `BASE_RETRY_DELAY` | Base retry delay | 1.0 sec |
 | `MODEL_CACHE_TTL` | Model cache TTL | 3600 sec (1 hour) |
+| `DEFAULT_MAX_INPUT_TOKENS` | Default max input tokens | 200000 |
+| `TOOL_DESCRIPTION_MAX_LENGTH` | Max tool description length | 10000 characters |
+| `DEBUG_LAST_REQUEST` | Enable debug logging | `false` |
+| `DEBUG_DIR` | Debug logs directory | `debug_logs` |
+| `APP_VERSION` | Application version | `1.0.1` |
 
-### 3.2. State Management Layer
+**Helper functions:**
+- `get_kiro_refresh_url(region)` — URL for token refresh
+- `get_kiro_api_host(region)` — main API host
+- `get_kiro_q_host(region)` — Q API host
+- `get_internal_model_id(external_model)` — model name conversion
+
+### 3.3. Pydantic Models (`kiro_gateway/models.py`)
+
+#### Models for `/v1/models`
+
+| Model | Description |
+|-------|-------------|
+| `OpenAIModel` | AI model description (id, object, created, owned_by) |
+| `ModelList` | Model list for endpoint response |
+
+#### Models for `/v1/chat/completions`
+
+| Model | Description |
+|-------|-------------|
+| `ChatMessage` | Chat message (role, content, tool_calls, tool_call_id) |
+| `ToolFunction` | Tool function description (name, description, parameters) |
+| `Tool` | OpenAI format tool (type, function) |
+| `ChatCompletionRequest` | Generation request (model, messages, stream, tools, ...) |
+
+#### Response Models
+
+| Model | Description |
+|-------|-------------|
+| `ChatCompletionChoice` | Single response variant |
+| `ChatCompletionUsage` | Token information (prompt_tokens, completion_tokens, credits_used) |
+| `ChatCompletionResponse` | Full response (non-streaming) |
+| `ChatCompletionChunk` | Streaming chunk |
+| `ChatCompletionChunkDelta` | Delta changes in chunk |
+| `ChatCompletionChunkChoice` | Variant in streaming chunk |
+
+### 3.4. State Management Layer
 
 #### KiroAuthManager (`kiro_gateway/auth.py`)
 
@@ -74,11 +137,24 @@ Centralized storage of all settings:
 
 **Concurrency Control:** Uses `asyncio.Lock` to protect against race conditions.
 
+**Main methods:**
+- `get_access_token()` — returns valid token, refreshing if necessary
+- `force_refresh()` — forced token refresh (on 403)
+- `is_token_expiring_soon()` — expiration time check
+
+**Properties:**
+- `profile_arn` — profile ARN
+- `region` — AWS region
+- `api_host` — API host for region
+- `q_host` — Q API host for region
+- `fingerprint` — unique machine fingerprint
+
 ```python
 # Usage example
 auth_manager = KiroAuthManager(
     refresh_token="your_token",
-    region="us-east-1"
+    region="us-east-1",
+    creds_file="~/.aws/sso/cache/kiro-auth-token.json"
 )
 token = await auth_manager.get_access_token()
 ```
@@ -92,7 +168,24 @@ token = await auth_manager.get_access_token()
 - Cache TTL: 1 hour
 - Fallback to static model list
 
-### 3.3. Conversion Layer (`kiro_gateway/converters.py`)
+**Main methods:**
+- `update(models_data)` — cache update
+- `get(model_id)` — get model information
+- `get_max_input_tokens(model_id)` — get token limit
+- `is_empty()` / `is_stale()` — cache state check
+- `get_all_model_ids()` — list of all model IDs
+
+### 3.5. Helper Utilities (`kiro_gateway/utils.py`)
+
+| Function | Description |
+|----------|-------------|
+| `get_machine_fingerprint()` | SHA256 hash of `{hostname}-{username}-kiro-gateway` |
+| `get_kiro_headers(auth_manager, token)` | Form headers for Kiro API |
+| `generate_completion_id()` | ID in format `chatcmpl-{uuid_hex}` |
+| `generate_conversation_id()` | UUID for conversation |
+| `generate_tool_call_id()` | ID in format `call_{uuid_hex[:8]}` |
+
+### 3.6. Conversion Layer (`kiro_gateway/converters.py`)
 
 #### Message Conversion
 
@@ -104,6 +197,27 @@ OpenAI messages are transformed into Kiro conversationState:
 4. **Tool calls** — OpenAI tools format support
 5. **Tool results** — correct transmission of tool call results
 
+#### Long Tool Description Handling
+
+**Problem:** Kiro API returns error 400 for too long descriptions in `toolSpecification.description`.
+
+**Solution:** Tool Documentation Reference Pattern
+- If `description ≤ TOOL_DESCRIPTION_MAX_LENGTH` → leave as is
+- If `description > TOOL_DESCRIPTION_MAX_LENGTH`:
+  * In `toolSpecification.description` → reference: `"[Full documentation in system prompt under '## Tool: {name}']"`
+  * In system prompt, section `"## Tool: {name}"` with full description is added
+
+**Function:** `process_tools_with_long_descriptions(tools)` → `(processed_tools, tool_documentation)`
+
+#### Main Functions
+
+| Function | Description |
+|----------|-------------|
+| `extract_text_content(content)` | Extract text from various formats |
+| `merge_adjacent_messages(messages)` | Merge adjacent messages with same role |
+| `build_kiro_history(messages, model_id)` | Build history array for Kiro |
+| `build_kiro_payload(request_data, conversation_id, profile_arn)` | Full payload for request |
+
 #### Model Mapping
 
 External model names are converted to internal Kiro IDs:
@@ -113,13 +227,15 @@ External model names are converted to internal Kiro IDs:
 | `claude-opus-4-5` | `claude-opus-4.5` |
 | `claude-opus-4-5-20251101` | `claude-opus-4.5` |
 | `claude-haiku-4-5` | `claude-haiku-4.5` |
+| `claude-haiku-4.5` | `claude-haiku-4.5` (direct passthrough) |
 | `claude-sonnet-4-5` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
 | `claude-sonnet-4-5-20250929` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
 | `claude-sonnet-4` | `CLAUDE_SONNET_4_20250514_V1_0` |
 | `claude-sonnet-4-20250514` | `CLAUDE_SONNET_4_20250514_V1_0` |
 | `claude-3-7-sonnet-20250219` | `CLAUDE_3_7_SONNET_20250219_V1_0` |
+| `auto` | `claude-sonnet-4.5` (alias) |
 
-### 3.4. Parsing Layer (`kiro_gateway/parsers.py`)
+### 3.7. Parsing Layer (`kiro_gateway/parsers.py`)
 
 #### AwsEventStreamParser
 
@@ -141,7 +257,32 @@ Advanced AWS SSE format parser with support for:
 | `usage` | Credit consumption information |
 | `context_usage` | Context usage percentage |
 
-### 3.5. HTTP Client (`kiro_gateway/http_client.py`)
+#### Helper Functions
+
+| Function | Description |
+|----------|-------------|
+| `find_matching_brace(text, start_pos)` | Find closing brace with nesting support |
+| `parse_bracket_tool_calls(response_text)` | Parse `[Called func with args: {...}]` |
+| `deduplicate_tool_calls(tool_calls)` | Remove duplicate tool calls |
+
+### 3.8. Streaming (`kiro_gateway/streaming.py`)
+
+#### stream_kiro_to_openai
+
+Async generator for transforming Kiro stream to OpenAI format.
+
+**Functionality:**
+- Parse AWS SSE stream via `AwsEventStreamParser`
+- Form OpenAI `chat.completion.chunk`
+- Handle tool calls (structured and bracket-style)
+- Calculate usage based on `contextUsagePercentage`
+- Debug logging via `debug_logger`
+
+#### collect_stream_response
+
+Collects full response from streaming for non-streaming mode.
+
+### 3.9. HTTP Client (`kiro_gateway/http_client.py`)
 
 #### KiroHttpClient
 
@@ -149,12 +290,59 @@ Automatic error handling with exponential backoff:
 
 | Error Code | Action |
 |------------|--------|
-| `403` | Token refresh + retry |
-| `429` | Exponential backoff (1s, 2s, 4s) |
-| `5xx` | Exponential backoff (up to 3 attempts) |
+| `403` | Token refresh via `force_refresh()` + retry |
+| `429` | Exponential backoff: `BASE_RETRY_DELAY * (2 ** attempt)` |
+| `5xx` | Exponential backoff (up to MAX_RETRIES attempts) |
 | Timeout | Exponential backoff |
 
-### 3.6. Kiro API Endpoints
+**Delay formula:** `1s, 2s, 4s` (with `BASE_RETRY_DELAY=1.0`)
+
+**Methods:**
+- `request_with_retry(method, url, json_data, stream)` — request with retry
+- `close()` — close client
+
+Supports async context manager (`async with`).
+
+### 3.10. Routes (`kiro_gateway/routes.py`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Health check (status, message, version) |
+| `/health` | GET | Detailed health check (status, timestamp, version) |
+| `/v1/models` | GET | List of available models (requires API key) |
+| `/v1/chat/completions` | POST | Chat completions (requires API key) |
+
+**Authentication:** Bearer token in `Authorization` header
+
+### 3.11. Exception Handling (`kiro_gateway/exceptions.py`)
+
+| Function | Description |
+|----------|-------------|
+| `sanitize_validation_errors(errors)` | Convert bytes to strings for JSON serialization |
+| `validation_exception_handler(request, exc)` | Pydantic validation error handler (422) |
+
+### 3.12. Debug Logging (`kiro_gateway/debug_logger.py`)
+
+**Class:** `DebugLogger` (singleton)
+
+**Activation:** `DEBUG_LAST_REQUEST=true` in `.env`
+
+**Methods:**
+| Method | Description |
+|--------|-------------|
+| `prepare_new_request()` | Clear directory for new request |
+| `log_request_body(body)` | Save incoming request |
+| `log_kiro_request_body(body)` | Save request to Kiro API |
+| `log_raw_chunk(chunk)` | Append raw chunk from Kiro |
+| `log_modified_chunk(chunk)` | Append transformed chunk |
+
+**Files in `debug_logs/`:**
+- `request_body.json` — incoming request (OpenAI format)
+- `kiro_request_body.json` — request to Kiro API
+- `response_stream_raw.txt` — raw stream from Kiro
+- `response_stream_modified.txt` — transformed stream (OpenAI format)
+
+### 3.13. Kiro API Endpoints
 
 All URLs are dynamically formed based on the region:
 
@@ -242,6 +430,13 @@ PROXY_API_KEY="your_proxy_secret"
 PROFILE_ARN="arn:aws:codewhisperer:..."
 KIRO_REGION="us-east-1"
 KIRO_CREDS_FILE="~/.aws/sso/cache/kiro-auth-token.json"
+
+# Debug
+DEBUG_LAST_REQUEST="false"
+DEBUG_DIR="debug_logs"
+
+# Limits
+TOOL_DESCRIPTION_MAX_LENGTH="10000"
 ```
 
 ### JSON Credentials File (optional)
@@ -301,9 +496,9 @@ data: [DONE]
 
 ### Debugging
 
-All requests and responses are logged in `debug_logs/`:
+When `DEBUG_LAST_REQUEST=true`, all requests and responses are logged in `debug_logs/`:
 - `request_body.json` — incoming request
-- `google_request_body.json` — request to Kiro API
+- `kiro_request_body.json` — request to Kiro API
 - `response_stream_raw.txt` — raw stream from Kiro
 - `response_stream_modified.txt` — transformed stream
 
@@ -336,3 +531,17 @@ class GeminiConverter:
 class GeminiParser:
     """Gemini SSE stream parsing."""
     pass
+```
+
+## 10. Dependencies
+
+Main project dependencies (from `requirements.txt`):
+
+| Package | Purpose |
+|---------|---------|
+| `fastapi` | Asynchronous web framework |
+| `uvicorn` | ASGI server |
+| `httpx` | Asynchronous HTTP client |
+| `pydantic` | Data validation and models |
+| `python-dotenv` | Environment variable loading |
+| `loguru` | Advanced logging |
