@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from kiro_gateway.http_client import KiroHttpClient
 from kiro_gateway.auth import KiroAuthManager
-from kiro_gateway.config import MAX_RETRIES, BASE_RETRY_DELAY
+from kiro_gateway.config import MAX_RETRIES, BASE_RETRY_DELAY, FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES
 
 
 @pytest.fixture
@@ -555,3 +555,250 @@ class TestKiroHttpClientExponentialBackoff:
         assert len(sleep_delays) == 2
         assert sleep_delays[0] == BASE_RETRY_DELAY * (2 ** 0)  # 1.0
         assert sleep_delays[1] == BASE_RETRY_DELAY * (2 ** 1)  # 2.0
+
+
+class TestKiroHttpClientFirstTokenTimeout:
+    """Тесты логики first token timeout для streaming запросов."""
+    
+    @pytest.mark.asyncio
+    async def test_streaming_uses_first_token_timeout(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет, что streaming запросы используют FIRST_TOKEN_TIMEOUT.
+        Цель: Убедиться, что для stream=True используется короткий таймаут.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        
+        mock_request = Mock()
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.build_request = Mock(return_value=mock_request)
+        mock_client.send = AsyncMock(return_value=mock_response)
+        
+        print("Действие: Выполнение streaming запроса...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient') as mock_async_client:
+            mock_async_client.return_value = mock_client
+            
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                response = await http_client.request_with_retry(
+                    "POST",
+                    "https://api.example.com/test",
+                    {"data": "value"},
+                    stream=True
+                )
+        
+        print("Проверка: AsyncClient создан с FIRST_TOKEN_TIMEOUT...")
+        mock_async_client.assert_called_with(timeout=FIRST_TOKEN_TIMEOUT, follow_redirects=True)
+        assert response.status_code == 200
+    
+    @pytest.mark.asyncio
+    async def test_streaming_uses_first_token_max_retries(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет, что streaming запросы используют FIRST_TOKEN_MAX_RETRIES.
+        Цель: Убедиться, что для stream=True используется отдельный счётчик retry.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_request = Mock()
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.build_request = Mock(return_value=mock_request)
+        mock_client.send = AsyncMock(side_effect=httpx.TimeoutException("Timeout"))
+        
+        print("Действие: Выполнение streaming запроса с таймаутами...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient', return_value=mock_client):
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                with pytest.raises(HTTPException) as exc_info:
+                    await http_client.request_with_retry(
+                        "POST",
+                        "https://api.example.com/test",
+                        {"data": "value"},
+                        stream=True
+                    )
+        
+        print(f"Проверка: HTTPException с кодом 504...")
+        assert exc_info.value.status_code == 504
+        assert str(FIRST_TOKEN_MAX_RETRIES) in exc_info.value.detail
+        
+        print(f"Проверка: Количество попыток = FIRST_TOKEN_MAX_RETRIES ({FIRST_TOKEN_MAX_RETRIES})...")
+        assert mock_client.send.call_count == FIRST_TOKEN_MAX_RETRIES
+    
+    @pytest.mark.asyncio
+    async def test_streaming_timeout_retry_without_delay(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет, что streaming таймаут retry происходит без задержки.
+        Цель: Убедиться, что при first token timeout нет exponential backoff.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        
+        mock_request = Mock()
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.build_request = Mock(return_value=mock_request)
+        # Первый таймаут, затем успех
+        mock_client.send = AsyncMock(side_effect=[
+            httpx.TimeoutException("Timeout"),
+            mock_response
+        ])
+        
+        sleep_called = False
+        
+        async def capture_sleep(delay):
+            nonlocal sleep_called
+            sleep_called = True
+        
+        print("Действие: Выполнение streaming запроса с одним таймаутом...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient', return_value=mock_client):
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                with patch('kiro_gateway.http_client.asyncio.sleep', side_effect=capture_sleep):
+                    response = await http_client.request_with_retry(
+                        "POST",
+                        "https://api.example.com/test",
+                        {"data": "value"},
+                        stream=True
+                    )
+        
+        print("Проверка: sleep() НЕ вызван для streaming таймаута...")
+        assert not sleep_called
+        assert response.status_code == 200
+    
+    @pytest.mark.asyncio
+    async def test_non_streaming_uses_default_timeout(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет, что non-streaming запросы используют 300 секунд.
+        Цель: Убедиться, что для stream=False используется длинный таймаут.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.request = AsyncMock(return_value=mock_response)
+        
+        print("Действие: Выполнение non-streaming запроса...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient') as mock_async_client:
+            mock_async_client.return_value = mock_client
+            
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                response = await http_client.request_with_retry(
+                    "POST",
+                    "https://api.example.com/test",
+                    {"data": "value"},
+                    stream=False
+                )
+        
+        print("Проверка: AsyncClient создан с таймаутом 300...")
+        mock_async_client.assert_called_with(timeout=300, follow_redirects=True)
+        assert response.status_code == 200
+    
+    @pytest.mark.asyncio
+    async def test_custom_first_token_timeout(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет использование кастомного first_token_timeout.
+        Цель: Убедиться, что параметр first_token_timeout переопределяет дефолт.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        
+        mock_request = Mock()
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.build_request = Mock(return_value=mock_request)
+        mock_client.send = AsyncMock(return_value=mock_response)
+        
+        custom_timeout = 5.0
+        
+        print(f"Действие: Выполнение streaming запроса с custom timeout={custom_timeout}...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient') as mock_async_client:
+            mock_async_client.return_value = mock_client
+            
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                response = await http_client.request_with_retry(
+                    "POST",
+                    "https://api.example.com/test",
+                    {"data": "value"},
+                    stream=True,
+                    first_token_timeout=custom_timeout
+                )
+        
+        print(f"Проверка: AsyncClient создан с таймаутом {custom_timeout}...")
+        mock_async_client.assert_called_with(timeout=custom_timeout, follow_redirects=True)
+        assert response.status_code == 200
+    
+    @pytest.mark.asyncio
+    async def test_streaming_timeout_returns_504(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет, что streaming таймаут возвращает 504.
+        Цель: Убедиться, что после исчерпания попыток возвращается 504 Gateway Timeout.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_request = Mock()
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.build_request = Mock(return_value=mock_request)
+        mock_client.send = AsyncMock(side_effect=httpx.TimeoutException("Timeout"))
+        
+        print("Действие: Выполнение streaming запроса с постоянными таймаутами...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient', return_value=mock_client):
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                with pytest.raises(HTTPException) as exc_info:
+                    await http_client.request_with_retry(
+                        "POST",
+                        "https://api.example.com/test",
+                        {"data": "value"},
+                        stream=True
+                    )
+        
+        print("Проверка: HTTPException с кодом 504 и сообщением о таймауте...")
+        assert exc_info.value.status_code == 504
+        assert "did not respond" in exc_info.value.detail
+        assert "Please try again" in exc_info.value.detail
+    
+    @pytest.mark.asyncio
+    async def test_non_streaming_timeout_returns_502(self, mock_auth_manager_for_http):
+        """
+        Что он делает: Проверяет, что non-streaming таймаут возвращает 502.
+        Цель: Убедиться, что для non-streaming используется старая логика с 502.
+        """
+        print("Настройка: Создание KiroHttpClient...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.request = AsyncMock(side_effect=httpx.TimeoutException("Timeout"))
+        
+        print("Действие: Выполнение non-streaming запроса с постоянными таймаутами...")
+        with patch('kiro_gateway.http_client.httpx.AsyncClient', return_value=mock_client):
+            with patch('kiro_gateway.http_client.get_kiro_headers', return_value={}):
+                with patch('kiro_gateway.http_client.asyncio.sleep', new_callable=AsyncMock):
+                    with pytest.raises(HTTPException) as exc_info:
+                        await http_client.request_with_retry(
+                            "POST",
+                            "https://api.example.com/test",
+                            {"data": "value"},
+                            stream=False
+                        )
+        
+        print("Проверка: HTTPException с кодом 502...")
+        assert exc_info.value.status_code == 502

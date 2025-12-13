@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from datetime import datetime, timezone, timedelta
 
 from fastapi.testclient import TestClient
+import httpx
 
 from kiro_gateway.config import PROXY_API_KEY, AVAILABLE_MODELS
 
@@ -310,20 +311,43 @@ class TestStreamingFlagHandling:
         """
         Что он делает: Проверяет, что stream=true принимается.
         Цель: Убедиться, что streaming режим доступен.
+        
+        Примечание: Для streaming режима нужен мок HTTP клиента,
+        так как запрос выполняется внутри генератора.
         """
         print("Запрос с stream=true...")
-        response = test_client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
-            json={
-                "model": "claude-sonnet-4-5",
-                "messages": [{"role": "user", "content": "Hello"}],
-                "stream": True
-            }
-        )
         
-        # Валидация должна пройти
-        assert response.status_code != 422
+        # Создаём мок response для streaming
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        
+        async def mock_aiter_bytes():
+            yield b'{"content":"Hello"}'
+            yield b'{"usage":0.5}'
+        
+        mock_response.aiter_bytes = mock_aiter_bytes
+        mock_response.aclose = AsyncMock()
+        
+        # Мокируем request_with_retry чтобы вернуть наш мок response
+        with patch('kiro_gateway.routes.KiroHttpClient') as MockHttpClient:
+            mock_client_instance = AsyncMock()
+            mock_client_instance.request_with_retry = AsyncMock(return_value=mock_response)
+            mock_client_instance.client = AsyncMock()
+            mock_client_instance.close = AsyncMock()
+            MockHttpClient.return_value = mock_client_instance
+            
+            response = test_client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True
+                }
+            )
+        
+        # Валидация должна пройти и streaming должен работать
+        assert response.status_code == 200
         print(f"stream=true: {response.status_code}")
     
     def test_stream_false_accepted(self, test_client, valid_proxy_api_key):

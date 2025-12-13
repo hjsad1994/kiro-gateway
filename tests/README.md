@@ -693,7 +693,7 @@ Unit-тесты для **streaming модуля** (преобразование 
 
 ### `tests/unit/test_http_client.py`
 
-Unit-тесты для **KiroHttpClient** (HTTP клиент с retry логикой). **21 тест.**
+Unit-тесты для **KiroHttpClient** (HTTP клиент с retry логикой). **29 тестов.**
 
 #### `TestKiroHttpClientInitialization`
 
@@ -732,6 +732,38 @@ Unit-тесты для **KiroHttpClient** (HTTP клиент с retry логик
 #### `TestKiroHttpClientExponentialBackoff`
 
 - **`test_backoff_delay_increases_exponentially()`**: Проверяет экспоненциальное увеличение задержки
+
+#### `TestKiroHttpClientFirstTokenTimeout`
+
+**Новые тесты для логики first token timeout для streaming запросов:**
+
+- **`test_streaming_uses_first_token_timeout()`**:
+  - **Что он делает**: Проверяет, что streaming запросы используют FIRST_TOKEN_TIMEOUT
+  - **Цель**: Убедиться, что для stream=True используется короткий таймаут
+
+- **`test_streaming_uses_first_token_max_retries()`**:
+  - **Что он делает**: Проверяет, что streaming запросы используют FIRST_TOKEN_MAX_RETRIES
+  - **Цель**: Убедиться, что для stream=True используется отдельный счётчик retry
+
+- **`test_streaming_timeout_retry_without_delay()`**:
+  - **Что он делает**: Проверяет, что streaming таймаут retry происходит без задержки
+  - **Цель**: Убедиться, что при first token timeout нет exponential backoff
+
+- **`test_non_streaming_uses_default_timeout()`**:
+  - **Что он делает**: Проверяет, что non-streaming запросы используют 300 секунд
+  - **Цель**: Убедиться, что для stream=False используется длинный таймаут
+
+- **`test_custom_first_token_timeout()`**:
+  - **Что он делает**: Проверяет использование кастомного first_token_timeout
+  - **Цель**: Убедиться, что параметр first_token_timeout переопределяет дефолт
+
+- **`test_streaming_timeout_returns_504()`**:
+  - **Что он делает**: Проверяет, что streaming таймаут возвращает 504
+  - **Цель**: Убедиться, что после исчерпания попыток возвращается 504 Gateway Timeout
+
+- **`test_non_streaming_timeout_returns_502()`**:
+  - **Что он делает**: Проверяет, что non-streaming таймаут возвращает 502
+  - **Цель**: Убедиться, что для non-streaming используется старая логика с 502
 
 ---
 

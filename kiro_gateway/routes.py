@@ -47,7 +47,7 @@ from kiro_gateway.models import (
 from kiro_gateway.auth import KiroAuthManager
 from kiro_gateway.cache import ModelInfoCache
 from kiro_gateway.converters import build_kiro_payload
-from kiro_gateway.streaming import stream_kiro_to_openai, collect_stream_response
+from kiro_gateway.streaming import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro_gateway.http_client import KiroHttpClient
 from kiro_gateway.utils import get_kiro_headers, generate_conversation_id
 
@@ -236,10 +236,11 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     
     # Создаём HTTP клиент с retry логикой
     http_client = KiroHttpClient(auth_manager)
-    
+    url = f"{auth_manager.api_host}/generateAssistantResponse"
     try:
-        url = f"{auth_manager.api_host}/generateAssistantResponse"
-        
+        # Делаем запрос к Kiro API (для обоих режимов - streaming и non-streaming)
+        # Это важно: мы ждём ответа от Kiro ПЕРЕД возвратом StreamingResponse,
+        # чтобы 200 OK означал что Kiro принял запрос и начал отвечать
         response = await http_client.request_with_retry(
             "POST",
             url,
@@ -276,6 +277,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
         
         else:
+            
             # Non-streaming режим - собираем весь ответ
             openai_response = await collect_stream_response(
                 http_client.client,

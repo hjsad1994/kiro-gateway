@@ -17,15 +17,24 @@ class TestLogLevelConfig:
         """
         Что он делает: Проверяет, что LOG_LEVEL по умолчанию равен INFO.
         Цель: Убедиться, что без переменной окружения используется INFO.
-        """
-        print("Настройка: Удаляем LOG_LEVEL из окружения...")
         
-        with patch.dict(os.environ, {}, clear=False):
-            # Удаляем LOG_LEVEL если есть
-            if "LOG_LEVEL" in os.environ:
-                del os.environ["LOG_LEVEL"]
-            
-            # Перезагружаем модуль config
+        Примечание: Этот тест проверяет логику кода config.py, а не реальное
+        значение из .env файла. Мы мокируем os.getenv чтобы симулировать
+        отсутствие переменной окружения.
+        """
+        print("Настройка: Мокируем os.getenv для LOG_LEVEL...")
+        
+        # Создаём мок который возвращает None для LOG_LEVEL (симулируя отсутствие переменной)
+        original_getenv = os.getenv
+        
+        def mock_getenv(key, default=None):
+            if key == "LOG_LEVEL":
+                print(f"os.getenv('{key}') -> None (мокировано)")
+                return default  # Возвращаем default, симулируя отсутствие переменной
+            return original_getenv(key, default)
+        
+        with patch.object(os, 'getenv', side_effect=mock_getenv):
+            # Перезагружаем модуль config с мокированным getenv
             import importlib
             import kiro_gateway.config as config_module
             importlib.reload(config_module)
@@ -33,6 +42,11 @@ class TestLogLevelConfig:
             print(f"LOG_LEVEL: {config_module.LOG_LEVEL}")
             print(f"Сравниваем: Ожидалось 'INFO', Получено '{config_module.LOG_LEVEL}'")
             assert config_module.LOG_LEVEL == "INFO"
+        
+        # Восстанавливаем модуль с реальными значениями
+        import importlib
+        import kiro_gateway.config as config_module
+        importlib.reload(config_module)
     
     def test_log_level_from_environment(self):
         """

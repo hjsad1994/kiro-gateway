@@ -358,6 +358,7 @@ def block_all_network_calls():
         patch('kiro_gateway.auth.httpx.AsyncClient', return_value=mock_async_client),
         patch('kiro_gateway.http_client.httpx.AsyncClient', return_value=mock_async_client),
         patch('kiro_gateway.routes.httpx.AsyncClient', return_value=mock_async_client),
+        patch('kiro_gateway.streaming.httpx.AsyncClient', return_value=mock_async_client),
     ]
     
     # Запускаем патчеры
