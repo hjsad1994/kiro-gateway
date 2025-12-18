@@ -1,5 +1,5 @@
 {
-  "contributors": ["Kartvya69"],
+  "contributors": ["Kartvya69", "Doggyman67"],
   "label": "cla-signed",
   "message": "Thanks for the PR! 🎉\n\nBefore merge, we need a one-time CLA confirmation.\nIt confirms that you have the right to contribute this code and allow the project to use it.\n\nFull CLA text:\nhttps://github.com/jwadow/kiro-openai-gateway/blob/main/CLA.md\n\nPlease reply with:\n```\nI have read the CLA and I accept its terms\n```"
 }
