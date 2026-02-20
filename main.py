@@ -370,6 +370,7 @@ async def lifespan(app: FastAPI):
         mongodb_db_name=MONGODB_DB_NAME,
         mongodb_collection=MONGODB_AUTH_KV_COLLECTION,
     )
+    app.state.auth_manager.start_periodic_account_pool_reload()
     
     # Create model cache
     app.state.model_cache = ModelInfoCache()
@@ -446,6 +447,12 @@ async def lifespan(app: FastAPI):
     
     # Graceful shutdown
     logger.info("Shutting down application...")
+    try:
+        await app.state.auth_manager.stop_periodic_account_pool_reload()
+        logger.info("Periodic auth account-pool reload stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping periodic auth account-pool reload: {e}")
+
     try:
         await app.state.http_client.aclose()
         logger.info("Shared HTTP client closed")

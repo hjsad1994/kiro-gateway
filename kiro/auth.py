@@ -51,6 +51,7 @@ except ImportError:
 
 from kiro.config import (
     TOKEN_REFRESH_THRESHOLD,
+    AUTH_POOL_RELOAD_INTERVAL_SECONDS,
     get_kiro_refresh_url,
     get_kiro_api_host,
     get_kiro_q_host,
@@ -188,6 +189,8 @@ class KiroAuthManager:
         self._round_robin_index: int = -1
         self._account_quarantine_seconds: int = DEFAULT_ACCOUNT_QUARANTINE_SECONDS
         self._request_account_key: ContextVar[Optional[str]] = ContextVar("request_account_key", default=None)
+        self._account_pool_reload_interval_seconds: int = AUTH_POOL_RELOAD_INTERVAL_SECONDS
+        self._account_pool_reload_task: Optional[asyncio.Task[Any]] = None
         
         self._access_token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
@@ -540,6 +543,127 @@ class KiroAuthManager:
         """Clear request-scoped selected account key."""
         self._request_account_key.set(None)
 
+    def _supports_periodic_account_pool_reload(self) -> bool:
+        """Return whether periodic full-pool reload is supported for current auth source."""
+        normalized_source = (self._auth_source or "auto").strip().lower()
+        if normalized_source == "mongodb":
+            return bool(self._mongodb_uri)
+        if normalized_source == "sqlite":
+            return bool(self._sqlite_db)
+        if normalized_source == "auto":
+            return bool(self._sqlite_db)
+        return False
+
+    def _reload_account_pool_from_source_locked(self) -> bool:
+        """
+        Reload full account pool from configured DB source.
+
+        Returns:
+            True when pool refresh applied successfully, False otherwise.
+        """
+        if not self._supports_periodic_account_pool_reload():
+            return False
+
+        previous_accounts_by_key: Dict[str, Dict[str, Any]] = {
+            str(account.get("key")): account
+            for account in self._account_pool
+            if account.get("key")
+        }
+        previous_round_robin_key: Optional[str] = None
+        if 0 <= self._round_robin_index < len(self._account_pool):
+            previous_round_robin_key = self._account_pool[self._round_robin_index].get("key")
+        selected_request_key = self._request_account_key.get()
+
+        normalized_source = (self._auth_source or "auto").strip().lower()
+        if normalized_source == "mongodb":
+            reloaded = self._load_credentials_from_mongodb()
+        elif self._sqlite_db:
+            reloaded = self._load_credentials_from_sqlite(self._sqlite_db)
+        else:
+            reloaded = False
+
+        if not reloaded:
+            return False
+
+        for account in self._account_pool:
+            account_key = account.get("key")
+            if not account_key:
+                continue
+            previous = previous_accounts_by_key.get(str(account_key))
+            if previous is not None:
+                account["quarantine_until"] = previous.get("quarantine_until")
+
+        if selected_request_key:
+            selected_account = self._find_account_by_key(selected_request_key)
+            if selected_account is None:
+                self._request_account_key.set(None)
+            else:
+                self._request_account_key.set(selected_request_key)
+                self._set_active_account(selected_account)
+
+        if previous_round_robin_key:
+            for index, account in enumerate(self._account_pool):
+                if account.get("key") == previous_round_robin_key:
+                    self._round_robin_index = index
+                    break
+
+        return True
+
+    async def _periodic_account_pool_reload_loop(self) -> None:
+        """Run periodic full-pool reload for DB-backed account sources."""
+        try:
+            while True:
+                await asyncio.sleep(self._account_pool_reload_interval_seconds)
+                async with self._lock:
+                    reloaded = self._reload_account_pool_from_source_locked()
+                    if reloaded:
+                        logger.debug(
+                            "Periodic account-pool reload completed (interval=%ss)",
+                            self._account_pool_reload_interval_seconds,
+                        )
+        except asyncio.CancelledError:
+            logger.debug("Periodic account-pool reload task cancelled")
+            raise
+
+    def start_periodic_account_pool_reload(self) -> bool:
+        """
+        Start background periodic account-pool reload task.
+
+        Returns:
+            True when task is started, False when task is skipped or already running.
+        """
+        if self._account_pool_reload_task and not self._account_pool_reload_task.done():
+            return False
+        if not self._supports_periodic_account_pool_reload():
+            return False
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("Skipping periodic account-pool reload start: no running event loop")
+            return False
+
+        self._account_pool_reload_task = loop.create_task(
+            self._periodic_account_pool_reload_loop()
+        )
+        logger.info(
+            f"Started periodic account-pool reload every {self._account_pool_reload_interval_seconds}s"
+        )
+        return True
+
+    async def stop_periodic_account_pool_reload(self) -> None:
+        """Stop background periodic account-pool reload task if running."""
+        if not self._account_pool_reload_task:
+            return
+
+        task = self._account_pool_reload_task
+        self._account_pool_reload_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     async def get_profile_arn_for_request(self) -> Optional[str]:
         """
         Resolve profile ARN for current request account.
@@ -626,7 +750,7 @@ class KiroAuthManager:
             logger.error(f"Failed to initialize MongoDB auth collection: {error}")
             return None
 
-    def _load_credentials_from_mongodb(self) -> None:
+    def _load_credentials_from_mongodb(self) -> bool:
         """
         Load credentials from MongoDB auth_kv collection.
 
@@ -635,13 +759,13 @@ class KiroAuthManager:
         """
         collection = self._get_mongodb_collection()
         if collection is None:
-            return
+            return False
 
         try:
             token_docs = self._iter_mongodb_auth_docs(collection, MONGODB_TOKEN_KEYS)
         except Exception as error:
             logger.error(f"Failed to query MongoDB auth documents: {error}")
-            return
+            return False
 
         parsed_accounts: List[Dict[str, Any]] = []
         registration_map: Dict[str, Dict[str, Any]] = {}
@@ -654,7 +778,7 @@ class KiroAuthManager:
 
         if not parsed_accounts:
             logger.warning("No valid credentials loaded from MongoDB auth_kv collection")
-            return
+            return False
 
         self._account_pool = parsed_accounts
         self._round_robin_index = -1
@@ -663,6 +787,7 @@ class KiroAuthManager:
             f"Loaded {len(self._account_pool)} account(s) from MongoDB collection: "
             f"{self._mongodb_db_name}.{self._mongodb_collection}"
         )
+        return True
 
     def _reload_active_account_from_mongodb_locked(self) -> None:
         """Reload active account payload from MongoDB by key."""
@@ -745,7 +870,7 @@ class KiroAuthManager:
 
         logger.warning("Failed to save credentials to MongoDB: no matching keys found")
     
-    def _load_credentials_from_sqlite(self, db_path: str) -> None:
+    def _load_credentials_from_sqlite(self, db_path: str) -> bool:
         """
         Loads credentials from kiro-cli SQLite database.
         
@@ -771,7 +896,7 @@ class KiroAuthManager:
             path = Path(db_path).expanduser()
             if not path.exists():
                 logger.warning(f"SQLite database not found: {db_path}")
-                return
+                return False
             
             conn = sqlite3.connect(str(path))
             cursor = conn.cursor()
@@ -814,8 +939,10 @@ class KiroAuthManager:
                 logger.info(
                     f"Loaded {len(self._account_pool)} account(s) from SQLite database: {db_path}"
                 )
+                return True
             else:
                 logger.warning(f"No valid credentials found in SQLite database: {db_path}")
+                return False
             
         except sqlite3.Error as e:
             logger.error(f"SQLite error loading credentials: {e}")
@@ -823,6 +950,7 @@ class KiroAuthManager:
             logger.error(f"JSON decode error in SQLite data: {e}")
         except Exception as e:
             logger.error(f"Error loading credentials from SQLite: {e}")
+        return False
     
     def _load_credentials_from_file(self, file_path: str) -> None:
         """
@@ -1414,6 +1542,10 @@ class KiroAuthManager:
             New access token
         """
         async with self._lock:
+            if self._account_pool:
+                account = self._get_or_select_request_account_locked()
+                if account:
+                    self._set_active_account(account)
             await self._refresh_token_request()
             if not self._access_token:
                 raise ValueError("Failed to obtain access token during force refresh")

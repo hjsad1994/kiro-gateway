@@ -20,7 +20,7 @@ estimated_hours: 6
 
 ### What problem are we solving?
 
-Current auth credential flow is effectively single-account: credentials are loaded from one JSON/env source and runtime token usage revolves around one active account context. This creates throughput and reliability limits when one account is rate-limited, invalid, or exhausted. The requested behavior is to store multiple Kiro auth accounts in DB and rotate usage via round-robin selection.
+Current auth credential flow is effectively single-account: credentials are loaded from one JSON/env source and runtime token usage revolves around one active account context. This creates throughput and reliability limits when one account is rate-limited, invalid, or exhausted. The requested behavior is to store multiple Kiro auth accounts in DB, rotate usage via round-robin selection, and continuously reload `auth_kv` so admins can replace expired/quota-exhausted credentials without restarting gateway processes.
 
 ### Why now?
 
@@ -39,6 +39,7 @@ The current single-account flow blocks scale and resiliency for concurrent gatew
 
 - Define DB-backed multi-account credential storage model for Kiro auth entries.
 - Load account pool from DB at startup and/or refresh points.
+- Reload account pool from DB every 10 seconds to pick up admin credential updates without server restart.
 - Implement deterministic round-robin account selection for request authentication.
 - Keep existing token refresh behavior, but target refresh and persistence to the selected account.
 - Add failure handling for unusable accounts (temporary skip/quarantine rules).
@@ -90,6 +91,15 @@ Gateway must assign requests to accounts using deterministic round-robin over el
 - **WHEN** sequential requests arrive and all accounts are healthy **THEN** account selection cycles A->B->C->A.
 - **WHEN** one account is quarantined **THEN** selection skips quarantined account and continues across remaining accounts.
 
+#### Periodic auth_kv Reload (10s)
+
+Gateway must refresh in-memory account pool from MongoDB `auth_kv` every 10 seconds during runtime.
+
+**Scenarios:**
+
+- **WHEN** admin updates/replaces a credential in DB **THEN** gateway picks up the new value within 10 seconds without restart.
+- **WHEN** an account reaches expiry/quota and admin updates DB record **THEN** subsequent selections use refreshed account data after the next reload cycle.
+
 #### Account-Scoped Token Refresh and Persistence
 
 Refresh and persistence must apply to the selected account source record, not global singleton state.
@@ -123,6 +133,8 @@ Existing env/json source paths must continue to work for users not yet migrated 
   - Verify: `pytest tests/unit/test_auth_manager.py -k "sqlite or account_pool" -v`
 - [ ] Round-robin selection distributes requests across eligible accounts in deterministic order.
   - Verify: `pytest tests/unit/test_auth_manager.py -k "round_robin" -v`
+- [ ] Runtime auth pool reload executes every 10 seconds and applies DB changes without restarting process/container.
+  - Verify: `pytest tests/unit/test_auth_manager.py -k "periodic_reload or auth_kv_reload" -v`
 - [ ] Refresh/persist logic updates only selected account, preserving account isolation under concurrency.
   - Verify: `pytest tests/unit/test_auth_manager.py -k "refresh and concurrency" -v`
 - [ ] OpenAI and Anthropic routes continue working unchanged while receiving auth tokens from pool mode.
@@ -228,6 +240,25 @@ files:
 
 - `pytest tests/unit/test_auth_manager.py -k "round_robin or quarantine" -v`
 
+### Implement periodic auth_kv reload scheduler (10s) [feature]
+
+Auth manager refreshes account pool from DB every 10 seconds and safely swaps eligible account state without interrupting requests.
+
+**Metadata:**
+
+```yaml
+depends_on: ["Define DB account pool model"]
+parallel: true
+conflicts_with: []
+files:
+  - kiro/auth.py
+  - main.py
+```
+
+**Verification:**
+
+- `pytest tests/unit/test_auth_manager.py -k "periodic_reload or scheduler" -v`
+
 ### Apply account-scoped refresh and persistence [feature]
 
 Token refresh and save operations target the selected account record only, preserving isolation between accounts.
@@ -235,7 +266,11 @@ Token refresh and save operations target the selected account record only, prese
 **Metadata:**
 
 ```yaml
-depends_on: ["Implement round-robin selector with eligibility filtering"]
+depends_on:
+  [
+    "Implement round-robin selector with eligibility filtering",
+    "Implement periodic auth_kv reload scheduler (10s)",
+  ]
 parallel: false
 conflicts_with: []
 files:

@@ -2711,6 +2711,146 @@ class TestKiroAuthManagerRoundRobin:
         assert data_a["access_token"] == "social_access_a"
         assert data_b["access_token"] == "updated_access_b"
 
+    def test_reload_account_pool_from_sqlite_detects_new_account(self, temp_sqlite_db_round_robin):
+        """
+        What it does: Verifies full-pool reload picks up newly added auth_kv account rows.
+        Purpose: Ensure runtime reload can apply admin DB updates without process restart.
+        """
+        import sqlite3
+
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_round_robin)
+        assert len(manager._account_pool) == 2
+
+        conn = sqlite3.connect(temp_sqlite_db_round_robin)
+        cursor = conn.cursor()
+        account_c = {
+            "access_token": "social_access_c",
+            "refresh_token": "social_refresh_c",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "provider": "microsoft",
+            "profile_arn": "arn:aws:codewhisperer:us-east-1:123456789:profile/account-c",
+            "region": "us-east-1",
+        }
+        cursor.execute(
+            "INSERT INTO auth_kv (key, value) VALUES (?, ?)",
+            ("kirocli:social:token:acct-c", json.dumps(account_c)),
+        )
+        conn.commit()
+        conn.close()
+
+        manager._auth_source = "sqlite"
+        reloaded = manager._reload_account_pool_from_source_locked()
+
+        assert reloaded is True
+        assert len(manager._account_pool) == 3
+        keys = [account["key"] for account in manager._account_pool]
+        assert "kirocli:social:token:acct-c" in keys
+
+    @pytest.mark.asyncio
+    async def test_periodic_reload_loop_invokes_pool_reload(self, temp_sqlite_db_round_robin):
+        """
+        What it does: Verifies periodic loop triggers full-pool reload repeatedly.
+        Purpose: Ensure scheduler enforces automatic DB reload cadence.
+        """
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_round_robin, auth_source="sqlite")
+        manager._account_pool_reload_interval_seconds = 1
+
+        original_sleep = asyncio.sleep
+        sleep_calls = 0
+
+        async def fake_sleep(_: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                raise asyncio.CancelledError
+            await original_sleep(0)
+
+        with patch.object(manager, "_reload_account_pool_from_source_locked", return_value=True) as reload_mock:
+            with patch("kiro.auth.asyncio.sleep", side_effect=fake_sleep):
+                with pytest.raises(asyncio.CancelledError):
+                    await manager._periodic_account_pool_reload_loop()
+
+        assert reload_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_periodic_reload_task(self, temp_sqlite_db_round_robin):
+        """
+        What it does: Verifies periodic reload task starts once and can be stopped cleanly.
+        Purpose: Ensure lifecycle hooks can manage background reload task.
+        """
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_round_robin, auth_source="sqlite")
+        manager._account_pool_reload_interval_seconds = 3600
+
+        started = manager.start_periodic_account_pool_reload()
+        started_again = manager.start_periodic_account_pool_reload()
+
+        assert started is True
+        assert started_again is False
+        assert manager._account_pool_reload_task is not None
+
+        await manager.stop_periodic_account_pool_reload()
+        assert manager._account_pool_reload_task is None
+
+    def test_reload_preserves_quarantine_for_existing_account(self, temp_sqlite_db_round_robin):
+        """
+        What it does: Verifies full-pool reload keeps quarantine state for existing keys.
+        Purpose: Ensure unhealthy-account cooldown is not reset by periodic reload.
+        """
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_round_robin, auth_source="sqlite")
+        quarantine_until = datetime.now(timezone.utc) + timedelta(seconds=120)
+        manager._account_pool[0]["quarantine_until"] = quarantine_until
+
+        reloaded = manager._reload_account_pool_from_source_locked()
+
+        assert reloaded is True
+        account_a = manager._find_account_by_key("kirocli:social:token")
+        assert account_a is not None
+        assert account_a["quarantine_until"] == quarantine_until
+
+    def test_reload_preserves_round_robin_cursor(self, temp_sqlite_db_round_robin):
+        """
+        What it does: Verifies periodic full-pool reload keeps round-robin cursor position.
+        Purpose: Prevent selection skew toward first account after each reload cycle.
+        """
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_round_robin, auth_source="sqlite")
+        manager._round_robin_index = 1
+
+        reloaded = manager._reload_account_pool_from_source_locked()
+
+        assert reloaded is True
+        assert manager._round_robin_index == 1
+        next_account = manager._select_next_account_locked()
+        assert next_account is not None
+        assert next_account["key"] == "kirocli:social:token"
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_uses_request_selected_account(self, temp_sqlite_db_round_robin):
+        """
+        What it does: Verifies force_refresh refreshes token for request-selected account key.
+        Purpose: Preserve account-scoped isolation when periodic reload changed active account.
+        """
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_round_robin, auth_source="sqlite")
+        account_a = manager._find_account_by_key("kirocli:social:token")
+        account_b = manager._find_account_by_key("kirocli:social:token:acct-b")
+        assert account_a is not None
+        assert account_b is not None
+
+        manager._request_account_key.set("kirocli:social:token:acct-b")
+        manager._set_active_account(account_a)
+
+        refreshed_for_key: dict[str, str] = {}
+
+        async def fake_refresh() -> None:
+            refreshed_for_key["key"] = manager._sqlite_token_key or ""
+            manager._access_token = "forced_refresh_token_b"
+
+        manager._refresh_token_request = AsyncMock(side_effect=fake_refresh)
+
+        token = await manager.force_refresh()
+
+        assert token == "forced_refresh_token_b"
+        assert refreshed_for_key["key"] == "kirocli:social:token:acct-b"
+
 
 class TestKiroAuthManagerMongoDbSource:
     """Tests for MongoDB auth_kv credential source."""

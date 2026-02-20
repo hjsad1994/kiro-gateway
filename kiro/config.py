@@ -319,6 +319,14 @@ KIRO_AUTH_SOURCE: str = _KIRO_AUTH_SOURCE_RAW if _KIRO_AUTH_SOURCE_RAW in (
     "mongodb",
 ) else "auto"
 
+# Periodic account-pool reload interval (seconds) for DB-backed auth sources.
+# Default 10s allows admins to update expired/quota-exhausted auth_kv entries
+# without restarting the gateway process.
+AUTH_POOL_RELOAD_INTERVAL_SECONDS: int = max(
+    _parse_int_env("AUTH_POOL_RELOAD_INTERVAL_SECONDS", 10),
+    1,
+)
+
 # ==================================================================================================
 # Kiro API URL Templates
 # ==================================================================================================

@@ -42,3 +42,30 @@ Started: 2026-02-20
 ### Open/Blocked
 
 - Global suite still has pre-existing failures outside bead scope (`tests/unit/test_config.py`, `tests/unit/test_model_resolver.py`).
+
+## 2026-02-21 Ship Execution (Periodic Reload)
+
+- Added periodic full account-pool reload support to `KiroAuthManager` in `kiro/auth.py`:
+  - `_supports_periodic_account_pool_reload`
+  - `_reload_account_pool_from_source_locked`
+  - `_periodic_account_pool_reload_loop`
+  - `start_periodic_account_pool_reload`
+  - `stop_periodic_account_pool_reload`
+- Added runtime config `AUTH_POOL_RELOAD_INTERVAL_SECONDS` (default `10`) in `kiro/config.py`.
+- Wired app lifecycle to start/stop periodic reload in `main.py` lifespan startup/shutdown.
+- Added tests in `tests/unit/test_auth_manager.py` for:
+  - detecting newly inserted auth_kv account on reload
+  - periodic loop invoking reload
+  - start/stop task lifecycle
+  - quarantine preservation across reload
+- Added config tests in `tests/unit/test_config.py` for reload interval default/env override and hardened auth-source default test against ambient env values.
+
+### Verification Evidence
+
+- `pytest tests/unit/test_auth_manager.py -k "periodic_reload or reload_account_pool_from_sqlite_detects_new_account or start_and_stop_periodic_reload_task or reload_preserves_quarantine" -v` -> pass (4 selected tests).
+- `pytest tests/unit/test_config.py -k "kiro_auth_source_defaults_to_auto or auth_pool_reload_interval" -v` -> pass.
+- `API_KEY_SOURCE=env pytest tests/unit/test_routes_openai.py tests/unit/test_routes_anthropic.py -v` -> pass (116 tests).
+- `pytest tests/unit/test_auth_manager.py tests/unit/test_config.py -v` -> 144 passed, 1 failed (`tests/unit/test_config.py::TestFallbackModelsIntegration::test_fallback_models_appear_in_available_models`, unrelated to auth reload).
+- `API_KEY_SOURCE=env pytest -v` -> 1427 passed, 13 failed, 3 warnings; failures limited to `tests/unit/test_config.py` fallback-model integration and `tests/unit/test_model_resolver.py` suite (outside periodic auth reload scope).
+- `ruff check .` -> fails with many pre-existing lint violations across unrelated files.
+- `mypy .` -> fails with many pre-existing type errors across unrelated files.

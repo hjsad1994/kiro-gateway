@@ -53,6 +53,22 @@
 			}
 		},
 		{
+			"id": "feature-3",
+			"category": "feature",
+			"title": "Implement periodic auth_kv reload scheduler (10s)",
+			"description": "Auth manager refreshes account pool from DB every 10 seconds and safely swaps eligible account state without interrupting requests.",
+			"steps": [
+				"pytest tests/unit/test_auth_manager.py -k \"periodic_reload or scheduler\" -v"
+			],
+			"passes": true,
+			"metadata": {
+				"depends_on": ["Define DB account pool model"],
+				"parallel": true,
+				"conflicts_with": [],
+				"files": ["kiro/auth.py", "main.py", "tests/unit/test_auth_manager.py"]
+			}
+		},
+		{
 			"id": "integration-1",
 			"category": "integration",
 			"title": "Wire pool mode into app startup and route compatibility paths",
@@ -62,7 +78,10 @@
 			],
 			"passes": true,
 			"metadata": {
-				"depends_on": ["Apply account-scoped refresh and persistence"],
+				"depends_on": [
+					"Apply account-scoped refresh and persistence",
+					"Implement periodic auth_kv reload scheduler (10s)"
+				],
 				"parallel": false,
 				"conflicts_with": [],
 				"files": [

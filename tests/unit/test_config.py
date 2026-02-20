@@ -519,7 +519,7 @@ class TestKiroAuthSourceConfig:
 
     def test_kiro_auth_source_defaults_to_auto(self):
         """Verify default KIRO_AUTH_SOURCE value."""
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {"KIRO_AUTH_SOURCE": ""}, clear=False):
             import importlib
             import kiro.config as config_module
             importlib.reload(config_module)
@@ -548,6 +548,22 @@ class TestKiroAuthSourceConfig:
             import kiro.config as config_module
             importlib.reload(config_module)
             assert config_module.MONGODB_AUTH_KV_COLLECTION == "auth_kv"
+
+    def test_auth_pool_reload_interval_defaults_to_ten_seconds(self):
+        """Verify periodic auth pool reload defaults to 10 seconds."""
+        with patch.dict(os.environ, {}, clear=False):
+            import importlib
+            import kiro.config as config_module
+            importlib.reload(config_module)
+            assert config_module.AUTH_POOL_RELOAD_INTERVAL_SECONDS == 10
+
+    def test_auth_pool_reload_interval_env_override(self):
+        """Verify AUTH_POOL_RELOAD_INTERVAL_SECONDS accepts integer env override."""
+        with patch.dict(os.environ, {"AUTH_POOL_RELOAD_INTERVAL_SECONDS": "25"}):
+            import importlib
+            import kiro.config as config_module
+            importlib.reload(config_module)
+            assert config_module.AUTH_POOL_RELOAD_INTERVAL_SECONDS == 25
 
 
 class TestFallbackModelsConfig:
