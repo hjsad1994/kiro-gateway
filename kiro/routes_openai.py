@@ -188,7 +188,7 @@ async def root():
     """
     return {
         "status": "ok",
-        "message": "Kiro Gateway is running",
+        "message": "TrollLLM is running",
         "version": APP_VERSION
     }
 

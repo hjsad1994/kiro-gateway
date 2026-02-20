@@ -207,7 +207,7 @@ class TestRootEndpoint:
         
         print(f"Result: {response.json()}")
         assert response.status_code == 200
-        assert "Kiro Gateway" in response.json()["message"]
+        assert "TrollLLM" in response.json()["message"]
     
     def test_root_returns_version(self, test_client):
         """

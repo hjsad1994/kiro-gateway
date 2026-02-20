@@ -619,8 +619,8 @@ FAKE_REASONING_INITIAL_BUFFER_SIZE: int = int(os.getenv("FAKE_REASONING_INITIAL_
 # ==================================================================================================
 
 APP_VERSION: str = "2.3"
-APP_TITLE: str = "Kiro Gateway"
-APP_DESCRIPTION: str = "Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer). OpenAI and Anthropic compatible. Made by @jwadow"
+APP_TITLE: str = "TrollLLM"
+APP_DESCRIPTION: str = "Transparent proxy gateway for Amazon Q Developer / AWS CodeWhisperer, OpenAI and Anthropic compatible."
 
 
 def get_kiro_refresh_url(region: str) -> str:
