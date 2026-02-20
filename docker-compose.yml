@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   kiro-gateway:
     build:
@@ -107,10 +105,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2" # Maximum CPU cores (streaming can be CPU-intensive)
+          cpus: "1.0" # Maximum CPU cores for single-vCPU hosts
           memory: 1G # Maximum memory (sufficient for FastAPI + streaming)
         reservations:
-          cpus: "0.5" # Minimum guaranteed CPU
+          cpus: "0.25" # Minimum guaranteed CPU
           memory: 256M # Minimum guaranteed memory
 
 networks:
