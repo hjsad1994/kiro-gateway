@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   kiro-gateway:
@@ -12,68 +12,106 @@ services:
       # Server configuration
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8000
-      
-      # Required: Set your proxy API key
-      # You can also use .env file (see env_file below)
-      - PROXY_API_KEY=${PROXY_API_KEY:-my-super-secret-password-123}
-      
-      # Authentication (choose one method)
-      # Option 1: Refresh token
+
+      # API key auth source (legacy env key or MongoDB)
+      - PROXY_API_KEY=${PROXY_API_KEY:-}
+      - API_KEY_SOURCE=${API_KEY_SOURCE:-mongodb}
+
+      # Kiro upstream authentication
+      - KIRO_AUTH_SOURCE=${KIRO_AUTH_SOURCE:-mongodb}
       - REFRESH_TOKEN=${REFRESH_TOKEN:-}
-      
-      # Option 2: Profile ARN (optional, for Kiro IDE)
-      - PROFILE_ARN=${PROFILE_ARN:-}
-      
-      # Option 3: Credentials file path (mounted as volume below)
       - KIRO_CREDS_FILE=${KIRO_CREDS_FILE:-}
-      
-      # Option 4: kiro-cli SQLite database (mounted as volume below)
       - KIRO_CLI_DB_FILE=${KIRO_CLI_DB_FILE:-}
-      
-      # Optional settings
+      - PROFILE_ARN=${PROFILE_ARN:-}
+
+      # MongoDB settings (API key lookup + billing + auth KV)
+      - MONGODB_URI=${MONGODB_URI:-}
+      - MONGODB_DB_NAME=${MONGODB_DB_NAME:-fproxy}
+      - MONGODB_AUTH_KV_COLLECTION=${MONGODB_AUTH_KV_COLLECTION:-auth_kv}
+      - MONGODB_USERS_COLLECTION=${MONGODB_USERS_COLLECTION:-usersNew}
+      - MONGODB_USER_API_KEY_FIELD=${MONGODB_USER_API_KEY_FIELD:-apiKey}
+      - MONGODB_USER_ID_FIELD=${MONGODB_USER_ID_FIELD:-_id}
+      - MONGODB_USER_ACTIVE_FIELD=${MONGODB_USER_ACTIVE_FIELD:-isActive}
+      - MONGODB_CREDITS_COLLECTION=${MONGODB_CREDITS_COLLECTION:-usersNew}
+      - MONGODB_CREDITS_USER_ID_FIELD=${MONGODB_CREDITS_USER_ID_FIELD:-_id}
+      - MONGODB_CREDITS_BALANCE_FIELD=${MONGODB_CREDITS_BALANCE_FIELD:-creditsNew}
+
+      # Billing settings
+      - BILLING_ENABLED=${BILLING_ENABLED:-true}
+      - BILLING_ENFORCE_SUFFICIENT_CREDITS=${BILLING_ENFORCE_SUFFICIENT_CREDITS:-true}
+      - BILLING_DECIMAL_PLACES=${BILLING_DECIMAL_PLACES:-6}
+      - BILLING_MODEL_PRICES_JSON=${BILLING_MODEL_PRICES_JSON:-[]}
+      - BILLING_UNKNOWN_MODEL_POLICY=${BILLING_UNKNOWN_MODEL_POLICY:-default}
+      - BILLING_DEFAULT_INPUT_PRICE_PER_MTOK=${BILLING_DEFAULT_INPUT_PRICE_PER_MTOK:-3.0}
+      - BILLING_DEFAULT_OUTPUT_PRICE_PER_MTOK=${BILLING_DEFAULT_OUTPUT_PRICE_PER_MTOK:-14.0}
+      - BILLING_DEFAULT_CACHE_WRITE_PRICE_PER_MTOK=${BILLING_DEFAULT_CACHE_WRITE_PRICE_PER_MTOK:-3.75}
+      - BILLING_DEFAULT_CACHE_HIT_PRICE_PER_MTOK=${BILLING_DEFAULT_CACHE_HIT_PRICE_PER_MTOK:-0.3}
+      - BILLING_DEFAULT_MULTIPLIER=${BILLING_DEFAULT_MULTIPLIER:-1.1}
+
+      # Model allowlist
+      - MODEL_ALLOWLIST_ENABLED=${MODEL_ALLOWLIST_ENABLED:-true}
+      - MODEL_ALLOWED_IDS_JSON=${MODEL_ALLOWED_IDS_JSON:-[]}
+
+      # Optional runtime settings
       - KIRO_REGION=${KIRO_REGION:-us-east-1}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEBUG_MODE=${DEBUG_MODE:-off}
-      
+
       # VPN/Proxy settings (for restricted networks)
       - VPN_PROXY_URL=${VPN_PROXY_URL:-}
-    
+      - FIRST_TOKEN_TIMEOUT=${FIRST_TOKEN_TIMEOUT:-15}
+      - FIRST_TOKEN_MAX_RETRIES=${FIRST_TOKEN_MAX_RETRIES:-3}
+      - STREAMING_READ_TIMEOUT=${STREAMING_READ_TIMEOUT:-300}
+
+      # Optional behavior flags
+      - FAKE_REASONING=${FAKE_REASONING:-false}
+      - FAKE_REASONING_MAX_TOKENS=${FAKE_REASONING_MAX_TOKENS:-4000}
+      - FAKE_REASONING_HANDLING=${FAKE_REASONING_HANDLING:-as_reasoning_content}
+      - FAKE_REASONING_INITIAL_BUFFER_SIZE=${FAKE_REASONING_INITIAL_BUFFER_SIZE:-20}
+      - TRUNCATION_RECOVERY=${TRUNCATION_RECOVERY:-false}
+
     # Alternative: Load all variables from .env file
     env_file:
       - .env
-    
+
     volumes:
       # Mount credentials file (if using KIRO_CREDS_FILE)
       # Uncomment and adjust path as needed:
       # - ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro
-      
+
       # Mount kiro-cli database (if using KIRO_CLI_DB_FILE)
       # Uncomment and adjust path as needed:
       # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli:ro
-      
+
       # Mount debug logs directory (optional, for debugging)
       - ./debug_logs:/app/debug_logs
-    
+
     restart: unless-stopped
-    
+
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import httpx; httpx.get('http://localhost:8000/health', timeout=5)",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
-    
+
     # Resource limits (recommended for production)
     # Adjust based on your workload and available resources
     deploy:
       resources:
         limits:
-          cpus: '2'        # Maximum CPU cores (streaming can be CPU-intensive)
-          memory: 1G       # Maximum memory (sufficient for FastAPI + streaming)
+          cpus: "2" # Maximum CPU cores (streaming can be CPU-intensive)
+          memory: 1G # Maximum memory (sufficient for FastAPI + streaming)
         reservations:
-          cpus: '0.5'      # Minimum guaranteed CPU
-          memory: 256M     # Minimum guaranteed memory
+          cpus: "0.5" # Minimum guaranteed CPU
+          memory: 256M # Minimum guaranteed memory
 
 networks:
   default:
