@@ -1,0 +1,34 @@
+# Progress Log
+
+Bead: bd-2d8
+Started: 2026-02-21
+
+## Codebase Patterns
+
+- OpenAI and Anthropic routes mirror billing flow and should keep logging parity.
+- Route layer is the right place for request identity + output metadata observability logs.
+- Debug middleware captures raw request body, while debug logger handles buffered artifacts.
+
+---
+
+<!-- Task logs below - APPEND ONLY -->
+
+## 2026-02-21 - Shipping Execution
+
+- Completed shared observability schema extraction in `kiro/billing_observability.py` and wired both route modules to use it.
+- Added username propagation in MongoDB auth context and explicit username nulling in env auth context for both routes.
+- Added structured `billing_observability` logs for OpenAI and Anthropic in streaming and non-streaming flows, including fallback for streaming without usage.
+- Added optional cache field extraction (`cache_hit`, `cache_write`) that logs fields only when present.
+- Added parity tests for both APIs: present/absent cache fields, username propagation, env anonymous fallback, streaming path observability.
+
+### Verification Evidence
+
+- `API_KEY_SOURCE=env pytest tests/unit/test_routes_openai.py -v` -> 69 passed.
+- `API_KEY_SOURCE=env pytest tests/unit/test_routes_anthropic.py -v` -> 60 passed.
+- `API_KEY_SOURCE=env pytest tests/unit/test_routes_openai.py -k "cache_fields or cache_hit or cache_write" -v` -> 2 passed.
+- `pytest tests/unit/test_debug_logger.py tests/unit/test_debug_middleware.py -v` -> 41 passed.
+
+### Review
+
+- External review run via subagent after implementation.
+- Final review assessment: pass with no blocking issues for PRD goals.

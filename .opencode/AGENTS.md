@@ -88,8 +88,9 @@ Use specialist agents by intent:
 | `@review`  | Correctness/security/debug review |
 | `@plan`    | Architecture and execution plans  |
 | `@vision`  | UI/UX and accessibility judgment  |
-| `@looker`  | OCR/PDF/diagram extraction        |
 | `@painter` | Image generation/editing          |
+
+**Note:** PDF extraction → use `pdf-extract` skill; Images → use vision-capable model directly
 
 **Parallelism rule**: Use parallel subagents for 3+ independent tasks; otherwise work sequentially.
 

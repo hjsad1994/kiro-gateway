@@ -66,6 +66,11 @@ from kiro.billing import (
     InsufficientCreditsError,
     UnknownModelPricingError,
 )
+from kiro.billing_observability import (
+    _build_billing_observability_log,
+    _extract_cache_fields,
+    _extract_username_from_user_doc,
+)
 
 # Import debug_logger
 try:
@@ -136,9 +141,11 @@ async def verify_api_key(
             raise HTTPException(status_code=500, detail="Authentication configuration error")
 
         if request is not None:
+            username = _extract_username_from_user_doc(user_doc)
             request.state.auth_context = {
                 "source": "mongodb",
                 "user_id": user_id,
+                "username": username,
                 "api_key": token,
             }
         return True
@@ -151,6 +158,7 @@ async def verify_api_key(
         request.state.auth_context = {
             "source": "env",
             "user_id": None,
+            "username": None,
             "api_key": PROXY_API_KEY,
         }
 
@@ -360,9 +368,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
     tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
 
+    prompt_tokens = count_message_tokens(messages_for_tokenizer, apply_claude_correction=False)
+    tool_tokens = count_tools_tokens(tools_for_tokenizer) if tools_for_tokenizer else 0
+
     if BILLING_ENABLED and billing_user_id is not None:
-        prompt_tokens = count_message_tokens(messages_for_tokenizer, apply_claude_correction=False)
-        tool_tokens = count_tools_tokens(tools_for_tokenizer) if tools_for_tokenizer else 0
         try:
             required_credits = calculate_preflight_charge(
                 model_id=request_data.model,
@@ -452,6 +461,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 streaming_error = None
                 client_disconnected = False
                 deduction_applied = False
+                observability_logged = False
                 try:
                     async for chunk in stream_kiro_to_openai(
                         stream_client,
@@ -506,6 +516,24 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                         payload_data["usage"] = usage_data
                                         chunk = f"data: {json.dumps(payload_data, ensure_ascii=False)}\n\n"
                                         deduction_applied = True
+
+                                    if not observability_logged:
+                                        cache_fields = _extract_cache_fields(payload_data)
+                                        observability_payload = _build_billing_observability_log(
+                                            endpoint="/v1/chat/completions",
+                                            model=request_data.model,
+                                            stream=True,
+                                            auth_context=auth_context,
+                                            billing_user_id=billing_user_id,
+                                            prompt_tokens=prompt_tokens,
+                                            tool_tokens=tool_tokens,
+                                            message_count=len(messages_for_tokenizer),
+                                            usage_payload=usage_data,
+                                            cache_fields=cache_fields,
+                                            status="streaming_usage_received",
+                                        )
+                                        logger.info("billing_observability={}", observability_payload)
+                                        observability_logged = True
                         yield chunk
                 except GeneratorExit:
                     # Client disconnected - this is normal
@@ -531,6 +559,22 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         logger.info("HTTP 200 - POST /v1/chat/completions (streaming) - client disconnected")
                     else:
                         logger.info("HTTP 200 - POST /v1/chat/completions (streaming) - completed")
+
+                    if not observability_logged:
+                        observability_payload = _build_billing_observability_log(
+                            endpoint="/v1/chat/completions",
+                            model=request_data.model,
+                            stream=True,
+                            auth_context=auth_context,
+                            billing_user_id=billing_user_id,
+                            prompt_tokens=prompt_tokens,
+                            tool_tokens=tool_tokens,
+                            message_count=len(messages_for_tokenizer),
+                            usage_payload=None,
+                            cache_fields={},
+                            status="streaming_completed_without_usage",
+                        )
+                        logger.info("billing_observability={}", observability_payload)
                     # Write debug logs AFTER streaming completes
                     if debug_logger:
                         if streaming_error:
@@ -574,6 +618,23 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             
             # Log access log for non-streaming success
             logger.info("HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
+
+            usage_payload = openai_response.get("usage") if isinstance(openai_response, dict) else None
+            cache_fields = _extract_cache_fields(openai_response) if isinstance(openai_response, dict) else {}
+            observability_payload = _build_billing_observability_log(
+                endpoint="/v1/chat/completions",
+                model=request_data.model,
+                stream=False,
+                auth_context=auth_context,
+                billing_user_id=billing_user_id,
+                prompt_tokens=prompt_tokens,
+                tool_tokens=tool_tokens,
+                message_count=len(messages_for_tokenizer),
+                usage_payload=usage_payload if isinstance(usage_payload, dict) else None,
+                cache_fields=cache_fields,
+                status="non_streaming_completed",
+            )
+            logger.info("billing_observability={}", observability_payload)
             
             # Write debug logs after non-streaming request completes
             if debug_logger:

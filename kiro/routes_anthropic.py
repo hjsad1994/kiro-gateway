@@ -60,6 +60,11 @@ from kiro.billing import (
     InsufficientCreditsError,
     UnknownModelPricingError,
 )
+from kiro.billing_observability import (
+    _build_billing_observability_log,
+    _extract_cache_fields,
+    _extract_username_from_user_doc,
+)
 
 # Import debug_logger
 try:
@@ -161,9 +166,11 @@ async def verify_anthropic_api_key(
             )
 
         if request is not None:
+            username = _extract_username_from_user_doc(user_doc)
             request.state.auth_context = {
                 "source": "mongodb",
                 "user_id": user_id,
+                "username": username,
                 "api_key": token,
             }
         return True
@@ -171,13 +178,13 @@ async def verify_anthropic_api_key(
     # Check x-api-key first (Anthropic native)
     if x_api_key and x_api_key == PROXY_API_KEY:
         if request is not None:
-            request.state.auth_context = {"source": "env", "user_id": None, "api_key": PROXY_API_KEY}
+            request.state.auth_context = {"source": "env", "user_id": None, "username": None, "api_key": PROXY_API_KEY}
         return True
 
     # Fall back to Authorization: Bearer
     if authorization and authorization == f"Bearer {PROXY_API_KEY}":
         if request is not None:
-            request.state.auth_context = {"source": "env", "user_id": None, "api_key": PROXY_API_KEY}
+            request.state.auth_context = {"source": "env", "user_id": None, "username": None, "api_key": PROXY_API_KEY}
         return True
     
     logger.warning("Access attempt with invalid API key (Anthropic endpoint)")
@@ -494,6 +501,7 @@ async def messages(
                 streaming_error = None
                 client_disconnected = False
                 deduction_applied = False
+                observability_logged = False
                 try:
                     async for chunk in stream_kiro_to_anthropic(
                         response,
@@ -549,6 +557,24 @@ async def messages(
                                             payload_data["usage"] = usage_payload
                                             chunk = f"event: message_delta\ndata: {json.dumps(payload_data, ensure_ascii=False)}\n\n"
                                             deduction_applied = True
+
+                                        if not observability_logged:
+                                            cache_fields = _extract_cache_fields(payload_data)
+                                            observability_payload = _build_billing_observability_log(
+                                                endpoint="/v1/messages",
+                                                model=request_data.model,
+                                                stream=True,
+                                                auth_context=auth_context,
+                                                billing_user_id=billing_user_id,
+                                                prompt_tokens=prompt_tokens,
+                                                tool_tokens=tool_tokens_for_billing,
+                                                message_count=len(messages_for_tokenizer),
+                                                usage_payload=usage_payload,
+                                                cache_fields=cache_fields,
+                                                status="streaming_usage_received",
+                                            )
+                                            logger.info("billing_observability={}", observability_payload)
+                                            observability_logged = True
                         yield chunk
                 except GeneratorExit:
                     client_disconnected = True
@@ -571,6 +597,22 @@ async def messages(
                         logger.info("HTTP 200 - POST /v1/messages (streaming) - client disconnected")
                     else:
                         logger.info("HTTP 200 - POST /v1/messages (streaming) - completed")
+
+                    if not observability_logged:
+                        observability_payload = _build_billing_observability_log(
+                            endpoint="/v1/messages",
+                            model=request_data.model,
+                            stream=True,
+                            auth_context=auth_context,
+                            billing_user_id=billing_user_id,
+                            prompt_tokens=prompt_tokens,
+                            tool_tokens=tool_tokens_for_billing,
+                            message_count=len(messages_for_tokenizer),
+                            usage_payload=None,
+                            cache_fields={},
+                            status="streaming_completed_without_usage",
+                        )
+                        logger.info("billing_observability={}", observability_payload)
                     
                     if debug_logger:
                         if streaming_error:
@@ -617,7 +659,24 @@ async def messages(
             await http_client.close()
             
             logger.info("HTTP 200 - POST /v1/messages (non-streaming) - completed")
-            
+
+            usage_payload = anthropic_response.get("usage") if isinstance(anthropic_response, dict) else None
+            cache_fields = _extract_cache_fields(anthropic_response) if isinstance(anthropic_response, dict) else {}
+            observability_payload = _build_billing_observability_log(
+                endpoint="/v1/messages",
+                model=request_data.model,
+                stream=False,
+                auth_context=auth_context,
+                billing_user_id=billing_user_id,
+                prompt_tokens=prompt_tokens,
+                tool_tokens=tool_tokens_for_billing,
+                message_count=len(messages_for_tokenizer),
+                usage_payload=usage_payload if isinstance(usage_payload, dict) else None,
+                cache_fields=cache_fields,
+                status="non_streaming_completed",
+            )
+            logger.info("billing_observability={}", observability_payload)
+
             if debug_logger:
                 debug_logger.discard_buffers()
             

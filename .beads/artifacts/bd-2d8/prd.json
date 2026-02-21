@@ -1,0 +1,114 @@
+{
+	"beadId": "bd-2d8",
+	"prdName": "billing-observability-logging",
+	"tasks": [
+		{
+			"id": "design-1",
+			"category": "design",
+			"title": "Define billing observability log schema",
+			"description": "A shared structured log schema is documented and used by both API routes for billing analysis fields, identity context, and optional cache metadata.",
+			"steps": [
+				"pytest tests/unit/test_routes_openai.py -v",
+				"pytest tests/unit/test_routes_anthropic.py -v"
+			],
+			"passes": true,
+			"metadata": {
+				"depends_on": [],
+				"parallel": false,
+				"conflicts_with": [],
+				"files": ["kiro/routes_openai.py", "kiro/routes_anthropic.py"]
+			}
+		},
+		{
+			"id": "implementation-1",
+			"category": "implementation",
+			"title": "Add OpenAI structured logging for input/output/cache fields",
+			"description": "OpenAI handler logs request input/output billing context with optional cache_hit/cache_write and identity context across streaming and non-streaming paths.",
+			"steps": ["pytest tests/unit/test_routes_openai.py -v"],
+			"passes": true,
+			"metadata": {
+				"depends_on": ["Define billing observability log schema"],
+				"parallel": false,
+				"conflicts_with": [
+					"Add Anthropic structured logging for input/output/cache fields"
+				],
+				"files": ["kiro/routes_openai.py", "tests/unit/test_routes_openai.py"]
+			}
+		},
+		{
+			"id": "implementation-2",
+			"category": "implementation",
+			"title": "Add Anthropic structured logging for input/output/cache fields",
+			"description": "Anthropic handler logs equivalent billing context and optional cache metadata with the same schema guarantees as OpenAI.",
+			"steps": ["pytest tests/unit/test_routes_anthropic.py -v"],
+			"passes": true,
+			"metadata": {
+				"depends_on": ["Define billing observability log schema"],
+				"parallel": false,
+				"conflicts_with": [
+					"Add OpenAI structured logging for input/output/cache fields"
+				],
+				"files": [
+					"kiro/routes_anthropic.py",
+					"tests/unit/test_routes_anthropic.py"
+				]
+			}
+		},
+		{
+			"id": "test-1",
+			"category": "test",
+			"title": "Add parity and optional-field regression tests",
+			"description": "Unit tests enforce route parity and confirm optional cache fields are logged only when present while preserving existing behavior.",
+			"steps": [
+				"pytest tests/unit/test_routes_openai.py tests/unit/test_routes_anthropic.py -v",
+				"pytest tests/unit/test_debug_logger.py tests/unit/test_debug_middleware.py -v"
+			],
+			"passes": true,
+			"metadata": {
+				"depends_on": [
+					"Add OpenAI structured logging for input/output/cache fields",
+					"Add Anthropic structured logging for input/output/cache fields"
+				],
+				"parallel": false,
+				"conflicts_with": [],
+				"files": [
+					"tests/unit/test_routes_openai.py",
+					"tests/unit/test_routes_anthropic.py",
+					"tests/unit/test_debug_logger.py",
+					"tests/unit/test_debug_middleware.py"
+				]
+			}
+		}
+	],
+	"context": {
+		"patterns": [
+			"kiro/routes_openai.py uses request.state.auth_context and billing_user_id before charge/deduction",
+			"kiro/routes_anthropic.py mirrors openai billing and auth context flow",
+			"kiro/debug_middleware.py logs raw request body; route layer handles business-context logging",
+			"kiro/debug_logger.py manages request/kiro payload logging lifecycle with flush/discard"
+		],
+		"keyFiles": [
+			"kiro/routes_openai.py",
+			"kiro/routes_anthropic.py",
+			"kiro/debug_logger.py",
+			"kiro/debug_middleware.py",
+			"tests/unit/test_routes_openai.py",
+			"tests/unit/test_routes_anthropic.py",
+			"tests/unit/test_debug_logger.py",
+			"tests/unit/test_debug_middleware.py"
+		],
+		"nonGoals": [
+			"Change billing model pricing rules or deduction formula",
+			"Alter external OpenAI or Anthropic response payload shapes",
+			"Add new authentication providers or change API-key verification logic",
+			"Build dashboards or external storage pipelines"
+		]
+	},
+	"beadMetadata": {
+		"depends_on": [],
+		"parallel": true,
+		"conflicts_with": [],
+		"blocks": [],
+		"estimated_hours": 3
+	}
+}

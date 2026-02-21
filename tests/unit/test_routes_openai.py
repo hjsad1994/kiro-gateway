@@ -1432,3 +1432,279 @@ class TestContentTruncationRecovery:
         print("Checking: Match found...")
         assert info is not None
         assert info.message_hash == hash1
+
+
+# =============================================================================
+# Tests for billing observability logging
+# =============================================================================
+
+class TestOpenAIBillingObservabilityLogging:
+    """Tests for billing observability logs in OpenAI route."""
+
+    def test_extract_cache_fields_includes_only_present_keys(self):
+        """What it does: Extracts cache fields from payload and usage.
+
+        Purpose: Ensure cache fields are logged only when present.
+        """
+        payload = {
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "cache_write": 19},
+            "cache_hit": True,
+        }
+
+        result = routes_openai._extract_cache_fields(payload)
+
+        assert result == {"cache_hit": True, "cache_write": 19}
+
+    def test_extract_cache_fields_returns_empty_when_absent(self):
+        """What it does: Verifies absent cache keys are not synthesized.
+
+        Purpose: Ensure extraction does not synthesize values.
+        """
+        payload = {"usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}
+
+        result = routes_openai._extract_cache_fields(payload)
+
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_verify_api_key_sets_username_in_auth_context(self, monkeypatch):
+        """What it does: Verifies MongoDB auth context includes username.
+
+        Purpose: Ensure route can log per-request username for billing analysis.
+        """
+        request = Mock()
+        request.state = Mock()
+
+        monkeypatch.setattr(routes_openai, "API_KEY_SOURCE", "mongodb")
+        monkeypatch.setattr(
+            routes_openai,
+            "find_active_user_by_api_key",
+            lambda _: {"_id": "user-123", "username": "alice"},
+        )
+        monkeypatch.setattr(routes_openai, "get_user_id_from_doc", lambda _: "user-123")
+
+        result = await routes_openai.verify_api_key("Bearer user-key", request=request)
+
+        assert result is True
+        assert request.state.auth_context["user_id"] == "user-123"
+        assert request.state.auth_context["username"] == "alice"
+
+    def test_non_streaming_logs_observability_with_cache_and_username(self, test_client, monkeypatch):
+        """What it does: Verifies non-streaming route emits billing observability log.
+
+        Purpose: Ensure logs include username and optional cache fields when present.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        monkeypatch.setattr(routes_openai, "API_KEY_SOURCE", "mongodb")
+        monkeypatch.setattr(
+            routes_openai,
+            "find_active_user_by_api_key",
+            lambda _: {"_id": "user-123", "username": "alice"},
+        )
+        monkeypatch.setattr(routes_openai, "get_user_id_from_doc", lambda _: "user-123")
+        monkeypatch.setattr(routes_openai, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_openai.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_openai.build_kiro_payload", return_value={"model": "claude-sonnet-4.5"}), \
+             patch(
+                 "kiro.routes_openai.collect_stream_response",
+                 AsyncMock(
+                     return_value={
+                         "id": "chatcmpl-1",
+                         "object": "chat.completion",
+                         "model": "claude-sonnet-4.5",
+                         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                         "cache_hit": True,
+                         "cache_write": 7,
+                     }
+                 ),
+             ), \
+             patch("kiro.routes_openai.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer user-key"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["user"]["username"] == "alice"
+        assert "api_key" not in payload["user"]
+        assert payload["response"]["cache_hit"] is True
+        assert payload["response"]["cache_write"] == 7
+
+    def test_streaming_logs_observability_when_usage_arrives(self, test_client, monkeypatch):
+        """What it does: Verifies streaming route emits billing observability log.
+
+        Purpose: Ensure streaming path logs usage and optional cache fields.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        async def mock_stream(_stream_client, _response, _model, _model_cache, _auth_manager, **_kwargs):
+            yield (
+                'data: {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, '
+                '"total_tokens": 7}, "cache_hit": true}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
+        monkeypatch.setattr(routes_openai, "API_KEY_SOURCE", "mongodb")
+        monkeypatch.setattr(
+            routes_openai,
+            "find_active_user_by_api_key",
+            lambda _: {"_id": "user-123", "username": "alice"},
+        )
+        monkeypatch.setattr(routes_openai, "get_user_id_from_doc", lambda _: "user-123")
+        monkeypatch.setattr(routes_openai, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_openai.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_openai.build_kiro_payload", return_value={"model": "claude-sonnet-4.5"}), \
+             patch("kiro.routes_openai.stream_kiro_to_openai", mock_stream), \
+             patch("kiro.routes_openai.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer user-key"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["request"]["stream"] is True
+        assert payload["response"]["cache_hit"] is True
+
+    def test_non_streaming_logs_anonymous_identity_in_env_mode(self, test_client, valid_proxy_api_key, monkeypatch):
+        """What it does: Verifies env mode uses anonymous identity fallback.
+
+        Purpose: Ensure fallback identity is present when username is unavailable.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        monkeypatch.setattr(routes_openai, "API_KEY_SOURCE", "env")
+        monkeypatch.setattr(routes_openai, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_openai.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_openai.build_kiro_payload", return_value={"model": "claude-sonnet-4.5"}), \
+             patch(
+                 "kiro.routes_openai.collect_stream_response",
+                 AsyncMock(
+                     return_value={
+                         "id": "chatcmpl-2",
+                         "object": "chat.completion",
+                         "model": "claude-sonnet-4.5",
+                         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                     }
+                 ),
+             ), \
+             patch("kiro.routes_openai.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["user"]["username"] is None
+        assert payload["user"]["identity"] == "anonymous"
+        assert "api_key" not in payload["user"]
+        assert payload["response"]["cache_hit"] is None
+        assert payload["response"]["cache_write"] is None
+
+    def test_streaming_logs_fallback_when_usage_missing(self, test_client, valid_proxy_api_key, monkeypatch):
+        """What it does: Verifies fallback observability log when stream has no usage.
+
+        Purpose: Ensure streaming completion still emits billing observability event.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        async def mock_stream(_stream_client, _response, _model, _model_cache, _auth_manager, **_kwargs):
+            yield 'data: {"choices": [{"index": 0, "delta": {"content": "hi"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        monkeypatch.setattr(routes_openai, "API_KEY_SOURCE", "env")
+        monkeypatch.setattr(routes_openai, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_openai.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_openai.build_kiro_payload", return_value={"model": "claude-sonnet-4.5"}), \
+             patch("kiro.routes_openai.stream_kiro_to_openai", mock_stream), \
+             patch("kiro.routes_openai.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["status"] == "streaming_completed_without_usage"
+        assert payload["response"]["usage"] is None
+        assert payload["response"]["cache_hit"] is None
+        assert payload["response"]["cache_write"] is None

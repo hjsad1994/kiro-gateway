@@ -11,7 +11,7 @@
     },
     "explore": {
       "description": "Fast codebase search specialist",
-      "model": "github-copilot/gemini-3.1-pro-preview"
+      "model": "github-copilot/claude-sonnet-4.6"
     },
     "general": {
       "description": "General-purpose subagent for fast, well-defined tasks; delegates complexity quickly",
@@ -23,7 +23,7 @@
     },
     "painter": {
       "description": "Image generation and editing specialist using Gemini 3 Pro Image. Use for creating UI mockups, app icons, hero images, visual assets, and editing/redacting existing images",
-      "model": "github-copilot/gemini-3.1-pro-preview"
+      "model": "github-copilot/gemini-3-pro-preview"
     },
     "plan": {
       "description": "Primary planning agent for architecture and multi-phase execution",
@@ -31,7 +31,7 @@
     },
     "review": {
       "description": "Code review, debugging, and security audit specialist",
-      "model": "github-copilot/gpt-5.2-codex"
+      "model": "github-copilot/claude-opus-4.6"
     },
     "scout": {
       "description": "External research specialist for library docs and patterns",
@@ -39,10 +39,10 @@
     },
     "vision": {
       "description": "Visual content specialist for multimodal analysis and UI/UX guidance",
-      "model": "github-copilot/gemini-3.1-pro-preview"
+      "model": "github-copilot/gemini-3-pro-preview"
     }
   },
-  "autoupdate": false,
+  "autoupdate": true,
   "formatter": {
     "biome": {
       "command": [

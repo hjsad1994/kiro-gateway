@@ -645,6 +645,42 @@ class TestGetModelIdForKiro:
         with pytest.raises(ValueError, match="Model is not allowed"):
             get_model_id_for_kiro("claude-opus-4.5", {})
 
+    def test_allows_minimax_and_deepseek_when_in_allowlist(self, monkeypatch):
+        """
+        What it does: Allows Minimax 2.1 and DeepSeek v3.2 in strict allowlist mode.
+        Goal: Ensure these models are not blocked when explicitly configured.
+        """
+        monkeypatch.setattr(model_resolver_module, "MODEL_ALLOWLIST_ENABLED", True)
+        monkeypatch.setattr(
+            model_resolver_module,
+            "get_model_allowed_ids",
+            lambda: {"minimax-2.1", "deepseek-v3.2"},
+        )
+
+        minimax_result = get_model_id_for_kiro("minimax-2.1", {})
+        deepseek_result = get_model_id_for_kiro("deepseek-v3.2", {})
+
+        assert minimax_result == "minimax-2.1"
+        assert deepseek_result == "deepseek-v3.2"
+
+    def test_allows_hyphenated_variants_when_in_allowlist(self, monkeypatch):
+        """
+        What it does: Allows hyphenated Minimax/DeepSeek variants in strict mode.
+        Goal: Support both dotted and hyphenated version naming patterns.
+        """
+        monkeypatch.setattr(model_resolver_module, "MODEL_ALLOWLIST_ENABLED", True)
+        monkeypatch.setattr(
+            model_resolver_module,
+            "get_model_allowed_ids",
+            lambda: {"minimax-2-1", "deepseek-v3-2"},
+        )
+
+        minimax_result = get_model_id_for_kiro("minimax-2-1", {})
+        deepseek_result = get_model_id_for_kiro("deepseek-v3-2", {})
+
+        assert minimax_result == "minimax-2-1"
+        assert deepseek_result == "deepseek-v3-2"
+
 
 # =============================================================================
 # TestModelResolver - Tests for ModelResolver class

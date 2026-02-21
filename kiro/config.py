@@ -231,7 +231,7 @@ MODEL_ALLOWLIST_ENABLED: bool = _parse_bool_env("MODEL_ALLOWLIST_ENABLED", False
 # - claude-haiku-4.5 / claude-haiku-4-5-20251001
 MODEL_ALLOWED_IDS_JSON: str = os.getenv(
     "MODEL_ALLOWED_IDS_JSON",
-    '["claude-sonnet-4.5","claude-haiku-4.5","claude-sonnet-4-5-20250929","claude-haiku-4-5-20251001"]',
+    '["claude-sonnet-4.5","claude-haiku-4.5","claude-sonnet-4-5-20250929","claude-haiku-4-5-20251001","minimax-2.1","minimax-2-1","deepseek-v3.2","deepseek-v3-2"]',
 )
 
 

@@ -1632,3 +1632,236 @@ class TestContentTruncationRecovery:
         print("Checking: Message unchanged...")
         text = self._get_block_value(modified_messages[0].content[0], "text")
         assert text == "This is a complete response."
+
+
+# =============================================================================
+# Tests for billing observability logging
+# =============================================================================
+
+class TestAnthropicBillingObservabilityLogging:
+    """Tests for billing observability logs in Anthropic route."""
+
+    def test_extract_cache_fields_includes_only_present_keys(self):
+        """What it does: Extracts cache fields from payload and usage.
+
+        Purpose: Ensure cache fields are logged only when present.
+        """
+        payload = {
+            "usage": {"input_tokens": 3, "output_tokens": 4, "cache_hit": False},
+            "cache_write": 11,
+        }
+
+        result = routes_anthropic._extract_cache_fields(payload)
+
+        assert result == {"cache_hit": False, "cache_write": 11}
+
+    def test_extract_cache_fields_returns_empty_when_absent(self):
+        """What it does: Verifies absent cache keys are not synthesized.
+
+        Purpose: Ensure extraction does not synthesize values.
+        """
+        payload = {"usage": {"input_tokens": 3, "output_tokens": 4}}
+
+        result = routes_anthropic._extract_cache_fields(payload)
+
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_verify_anthropic_api_key_sets_username_in_auth_context(self, monkeypatch):
+        """What it does: Verifies MongoDB auth context includes username.
+
+        Purpose: Ensure route can log per-request username for billing analysis.
+        """
+        request = Mock()
+        request.state = Mock()
+
+        monkeypatch.setattr(routes_anthropic, "API_KEY_SOURCE", "mongodb")
+        monkeypatch.setattr(
+            routes_anthropic,
+            "find_active_user_by_api_key",
+            lambda _: {"_id": "u-1", "username": "bob"},
+        )
+        monkeypatch.setattr(routes_anthropic, "get_user_id_from_doc", lambda _: "u-1")
+
+        result = await routes_anthropic.verify_anthropic_api_key(
+            x_api_key="user-key",
+            authorization=None,
+            request=request,
+        )
+
+        assert result is True
+        assert request.state.auth_context["user_id"] == "u-1"
+        assert request.state.auth_context["username"] == "bob"
+
+    def test_non_streaming_logs_observability_with_cache_and_username(self, test_client, monkeypatch):
+        """What it does: Verifies non-streaming route emits billing observability log.
+
+        Purpose: Ensure logs include username and optional cache fields when present.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        monkeypatch.setattr(routes_anthropic, "API_KEY_SOURCE", "mongodb")
+        monkeypatch.setattr(
+            routes_anthropic,
+            "find_active_user_by_api_key",
+            lambda _: {"_id": "u-1", "username": "bob"},
+        )
+        monkeypatch.setattr(routes_anthropic, "get_user_id_from_doc", lambda _: "u-1")
+        monkeypatch.setattr(routes_anthropic, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_anthropic.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"model": "claude-sonnet-4.5"}), \
+             patch(
+                 "kiro.routes_anthropic.collect_anthropic_response",
+                 AsyncMock(
+                     return_value={
+                         "id": "msg-1",
+                         "type": "message",
+                         "role": "assistant",
+                         "content": [{"type": "text", "text": "ok"}],
+                         "usage": {"input_tokens": 6, "output_tokens": 2},
+                         "cache_hit": True,
+                     }
+                 ),
+             ), \
+             patch("kiro.routes_anthropic.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": "user-key"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["user"]["username"] == "bob"
+        assert "api_key" not in payload["user"]
+        assert payload["response"]["cache_hit"] is True
+
+    def test_streaming_logs_observability_when_usage_arrives(self, test_client, monkeypatch):
+        """What it does: Verifies streaming route emits billing observability log.
+
+        Purpose: Ensure streaming path logs usage and optional cache fields.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        async def mock_stream(*_args, **_kwargs):
+            yield (
+                'event: message_delta\ndata: {"type": "message_delta", "delta": {}, '
+                '"usage": {"input_tokens": 4, "output_tokens": 1}, "cache_write": 9}\n\n'
+            )
+            yield "event: message_stop\ndata: {}\n\n"
+
+        monkeypatch.setattr(routes_anthropic, "API_KEY_SOURCE", "mongodb")
+        monkeypatch.setattr(
+            routes_anthropic,
+            "find_active_user_by_api_key",
+            lambda _: {"_id": "u-1", "username": "bob"},
+        )
+        monkeypatch.setattr(routes_anthropic, "get_user_id_from_doc", lambda _: "u-1")
+        monkeypatch.setattr(routes_anthropic, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_anthropic.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"model": "claude-sonnet-4.5"}), \
+             patch("kiro.routes_anthropic.stream_kiro_to_anthropic", mock_stream), \
+             patch("kiro.routes_anthropic.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": "user-key"},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["request"]["stream"] is True
+        assert payload["response"]["cache_write"] == 9
+
+    def test_non_streaming_logs_anonymous_identity_in_env_mode(self, test_client, valid_proxy_api_key, monkeypatch):
+        """What it does: Verifies env mode uses anonymous identity fallback.
+
+        Purpose: Ensure fallback identity is present when username is unavailable.
+        """
+        mock_http_response = MagicMock()
+        mock_http_response.status_code = 200
+
+        mock_http_client = MagicMock()
+        mock_http_client.request_with_retry = AsyncMock(return_value=mock_http_response)
+        mock_http_client.close = AsyncMock()
+        mock_http_client.client = Mock()
+
+        mocked_info = Mock()
+
+        monkeypatch.setattr(routes_anthropic, "API_KEY_SOURCE", "env")
+        monkeypatch.setattr(routes_anthropic, "BILLING_ENABLED", False)
+
+        with patch("kiro.routes_anthropic.KiroHttpClient", return_value=mock_http_client), \
+             patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"model": "claude-sonnet-4.5"}), \
+             patch(
+                 "kiro.routes_anthropic.collect_anthropic_response",
+                 AsyncMock(
+                     return_value={
+                         "id": "msg-2",
+                         "type": "message",
+                         "role": "assistant",
+                         "content": [{"type": "text", "text": "ok"}],
+                         "usage": {"input_tokens": 6, "output_tokens": 2},
+                     }
+                 ),
+             ), \
+             patch("kiro.routes_anthropic.logger.info", mocked_info):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+
+        observability_calls = [
+            call for call in mocked_info.call_args_list if call.args and call.args[0] == "billing_observability={}"
+        ]
+        assert observability_calls
+        payload = observability_calls[-1].args[1]
+        assert payload["user"]["username"] is None
+        assert payload["user"]["identity"] == "anonymous"
+        assert "api_key" not in payload["user"]
+        assert payload["response"]["cache_hit"] is None
+        assert payload["response"]["cache_write"] is None
